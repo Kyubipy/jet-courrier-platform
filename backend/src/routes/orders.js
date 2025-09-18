@@ -86,4 +86,126 @@ router.get('/client/:client_id', async (req, res) => {
   }
 });
 
+// Ver pedido específico con detalles completos
+router.get('/:order_id', async (req, res) => {
+  try {
+    const { order_id } = req.params;
+    
+    const result = await query(`
+      SELECT o.*, 
+             u.full_name as delivery_name, 
+             u.phone as delivery_phone,
+             c.full_name as client_name,
+             c.phone as client_phone
+      FROM orders o
+      LEFT JOIN users u ON o.delivery_id = u.id AND u.role = 'delivery'
+      LEFT JOIN users c ON o.client_id = c.id AND c.role = 'client'
+      WHERE o.id = $1
+    `, [order_id]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Pedido no encontrado' });
+    }
+
+    res.json({
+      message: '📄 Detalles del pedido',
+      order: result.rows[0]
+    });
+
+  } catch (error) {
+    console.error('Error obteniendo pedido:', error);
+    res.status(500).json({ error: 'Error obteniendo pedido' });
+  }
+});
+
+// Actualizar estado del pedido
+router.patch('/:order_id/status', async (req, res) => {
+  try {
+    const { order_id } = req.params;
+    const { status } = req.body;
+    
+    // Validar estados permitidos
+    const validStatuses = ['pending', 'matching', 'accepted', 'picking_up', 'in_transit', 'delivered', 'cancelled'];
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({ error: 'Estado no válido' });
+    }
+
+    // Determinar qué timestamp actualizar según el estado
+    let timestampUpdate = '';
+    if (status === 'accepted') timestampUpdate = ', accepted_at = CURRENT_TIMESTAMP';
+    if (status === 'picking_up') timestampUpdate = ', picked_up_at = CURRENT_TIMESTAMP';
+    if (status === 'delivered') timestampUpdate = ', delivered_at = CURRENT_TIMESTAMP';
+    
+    const updateQuery = `
+      UPDATE orders 
+      SET status = $1, updated_at = CURRENT_TIMESTAMP${timestampUpdate}
+      WHERE id = $2 
+      RETURNING *
+    `;
+    
+    const result = await query(updateQuery, [status, order_id]);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Pedido no encontrado' });
+    }
+
+    // Obtener datos completos del pedido actualizado
+    const completeResult = await query(`
+      SELECT o.*, 
+             u.full_name as delivery_name, 
+             u.phone as delivery_phone
+      FROM orders o
+      LEFT JOIN users u ON o.delivery_id = u.id
+      WHERE o.id = $1
+    `, [order_id]);
+
+    res.json({
+      message: `✅ Estado actualizado a: ${status}`,
+      order: completeResult.rows[0],
+      next_status: getNextStatus(status)
+    });
+    
+  } catch (error) {
+    console.error('Error actualizando estado:', error);
+    res.status(500).json({ error: 'Error actualizando estado' });
+  }
+});
+
+// Ver pedidos del delivery
+router.get('/delivery/:delivery_id', async (req, res) => {
+  try {
+    const { delivery_id } = req.params;
+    
+    const result = await query(`
+      SELECT o.*, c.full_name as client_name, c.phone as client_phone
+      FROM orders o
+      JOIN users c ON o.client_id = c.id
+      WHERE o.delivery_id = $1
+      ORDER BY o.created_at DESC
+    `, [delivery_id]);
+
+    res.json({
+      message: '🏍️ Pedidos del delivery',
+      orders: result.rows
+    });
+
+  } catch (error) {
+    console.error('Error obteniendo pedidos del delivery:', error);
+    res.status(500).json({ error: 'Error obteniendo pedidos del delivery' });
+  }
+});
+
+// Función helper para determinar el próximo estado
+function getNextStatus(currentStatus) {
+  const statusFlow = {
+    'pending': 'matching',
+    'matching': 'accepted',
+    'accepted': 'picking_up',
+    'picking_up': 'in_transit',
+    'in_transit': 'delivered',
+    'delivered': null
+  };
+  return statusFlow[currentStatus];
+}
+
 module.exports = router;
