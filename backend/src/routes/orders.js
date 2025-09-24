@@ -195,6 +195,92 @@ router.get('/delivery/:delivery_id', async (req, res) => {
   }
 });
 
+// Aceptar pedido ofrecido
+router.post('/:order_id/accept', async (req, res) => {
+  try {
+    const { order_id } = req.params;
+    const { delivery_id } = req.body;
+    
+    // Verificar que el pedido esté disponible
+    const checkResult = await query('SELECT * FROM orders WHERE id = $1 AND delivery_id IS NULL AND status = $2', [order_id, 'pending']);
+    
+    if (checkResult.rows.length === 0) {
+      return res.status(400).json({ error: 'Pedido no disponible' });
+    }
+    
+    // Asignar delivery y cambiar status
+    const result = await query(`
+      UPDATE orders 
+      SET delivery_id = $1, status = 'accepted', accepted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+      WHERE id = $2 AND delivery_id IS NULL
+      RETURNING *
+    `, [delivery_id, order_id]);
+    
+    if (result.rows.length === 0) {
+      return res.status(409).json({ error: 'Pedido ya fue tomado por otro delivery' });
+    }
+    
+    res.json({
+      message: 'Pedido aceptado exitosamente',
+      order: result.rows[0]
+    });
+    
+  } catch (error) {
+    console.error('Error aceptando pedido:', error);
+    res.status(500).json({ error: 'Error aceptando pedido' });
+  }
+});
+
+// Rechazar pedido ofrecido
+router.post('/:order_id/reject', async (req, res) => {
+  try {
+    const { order_id } = req.params;
+    const { delivery_id } = req.body;
+    
+    // Registrar el rechazo
+    await query(`
+      INSERT INTO delivery_rejections (order_id, delivery_id, rejected_at)
+      VALUES ($1, $2, CURRENT_TIMESTAMP)
+      ON CONFLICT (order_id, delivery_id) DO UPDATE SET rejected_at = CURRENT_TIMESTAMP
+    `, [order_id, delivery_id]);
+    
+    res.json({ message: 'Pedido rechazado' });
+    
+  } catch (error) {
+    console.error('Error rechazando pedido:', error);
+    res.status(500).json({ error: 'Error rechazando pedido' });
+  }
+});
+
+// Obtener pedidos ofrecidos a un delivery específico
+router.get('/offers/:delivery_id', async (req, res) => {
+  try {
+    const { delivery_id } = req.params;
+    
+    const result = await query(`
+      SELECT o.*, c.full_name as client_name, c.phone as client_phone
+      FROM orders o
+      JOIN users c ON o.client_id = c.id
+      WHERE o.status = 'pending' 
+      AND o.delivery_id IS NULL
+      AND o.id NOT IN (
+        SELECT order_id FROM delivery_rejections 
+        WHERE delivery_id = $1 AND rejected_at > NOW() - INTERVAL '1 hour'
+      )
+      ORDER BY o.created_at ASC
+    `, [delivery_id]);
+    
+    res.json({
+      message: 'Pedidos disponibles',
+      offers: result.rows
+    });
+    
+  } catch (error) {
+    console.error('Error obteniendo ofertas:', error);
+    res.status(500).json({ error: 'Error obteniendo ofertas' });
+  }
+});
+
 // Función helper para determinar el próximo estado
 function getNextStatus(currentStatus) {
   const statusFlow = {
